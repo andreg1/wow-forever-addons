@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Forever Sleeping Bag
+## Notes: Reminds you to use your Cozy Sleeping Bag when Well-Rested is missing, under 3 stacks, or about to run out.
+## Author: andreg1
+## Version: 1.0.0
+## SavedVariablesPerCharacter: ForeverSleepingBagDB
+
+ForeverSleepingBag.lua

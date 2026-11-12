@@ -1,0 +1,9 @@
+## Interface: 120000, 120001, 120005, 120007, 120100, 120105, 16001
+## Title: |cff0cd29fEllesmereUI|r Bags - Item Lock
+## Notes: Alt+Right-click a bag item to lock it: locked items can't be sold or destroyed.
+## Author: andreg1
+## Version: 1.0.0
+## Dependencies: EllesmereUIBags
+## SavedVariablesPerCharacter: EllesmereUIBags_ItemLockDB
+
+ItemLock.lua
