@@ -3,8 +3,11 @@
 --
 --  Watches for rare quest mobs you still need (e.g. Ghostpaw, who roams all
 --  over the Riverglades) while you're in their zone, and when one shows up:
---  raid-warning text + sound + taskbar flash, a raid marker on it, and a map
---  waypoint when its position is known.
+--  raid-warning text + sound + taskbar flash, and a map waypoint when its
+--  position is known. Raid marker and ping come from the scan key (below):
+--  SetRaidTarget and pings are Blizzard-UI-only from addon code on this
+--  client (ADDON_ACTION_FORBIDDEN popup, even out of combat, which pcall
+--  can't suppress), but a macro the player presses may use /tm and /ping.
 --
 --  What gets watched: for every incomplete quest in your log, from QuestieDB
 --  (the QuestDB / NpcDB / ItemDB globals of the QuestieDB addon):
@@ -25,8 +28,9 @@
 --      give a map position for the waypoint);
 --    * the "Scan for rare quest mobs" key binding (or /click
 --      QuestieRareObjectivesScan) runs /targetexact for every active mob.
---      That reaches further than nameplates; a hit targets it, and the
---      target check above raises the alert.
+--      That reaches further than nameplates; a hit targets, marks and pings
+--      it, and the target check above raises the alert. A miss restores
+--      your previous target.
 --  A mob alerts once, then again only after it was out of sight for
 --  db.realert seconds. Dead mobs are ignored.
 --
@@ -50,10 +54,13 @@ local defaults = {
     enabled = true,
     interval = 1,      -- seconds between scans
     realert = 120,     -- seconds out of sight before the same mob alerts again
-    marker = 8,        -- raid marker (1-8), 0 = none
     sound = true,
     flash = true,
     waypoint = true,
+    marker = 8,        -- scan key: raid marker on a found mob (1-8), 0 = none
+    ping = true,       -- scan key: ping a found mob
+    pingCooldown = 15, -- seconds before the scan pings again
+    macroExtra = "",   -- last line of the QRareScan macro (e.g. "/cast <mount>")
     manual = {},       -- [lowercase name] = display name, watched anywhere
 }
 
@@ -269,17 +276,6 @@ local function QuestText(entry)
     return #titles > 0 and (" (" .. table.concat(titles, ", ") .. ")") or ""
 end
 
-local function CanMark()
-    if not IsInGroup() then return true end
-    return UnitIsGroupLeader("player") or UnitIsGroupAssistant("player")
-end
-
-local function Mark(unit)
-    if not unit or db.marker < 1 or db.marker > 8 then return end
-    if GetRaidTargetIndex(unit) or not CanMark() then return end
-    pcall(SetRaidTarget, unit, db.marker)
-end
-
 local function SetWaypoint(pos)
     if not (db.waypoint and pos and C_Map.SetUserWaypoint and UiMapPoint) then return end
     pcall(function()
@@ -299,7 +295,9 @@ local function Alert(entry, unit, pos)
     if RaidNotice_AddMessage and RaidWarningFrame then
         RaidNotice_AddMessage(RaidWarningFrame, text, ChatTypeInfo and ChatTypeInfo.RAID_WARNING or { r = 1, g = 0.3, b = 0.1 })
     end
-    Say(text .. QuestText(entry))
+    local key = GetBindingKey and GetBindingKey("CLICK " .. SCAN_BUTTON .. ":LeftButton")
+    local hint = key and (" Press " .. GetBindingText(key) .. " to target, mark and ping it.") or ""
+    Say(text .. QuestText(entry) .. hint)
     if db.sound then
         PlaySound(SOUNDKIT and SOUNDKIT.RAID_WARNING or 8959, "Master")
     end
@@ -311,7 +309,6 @@ local function Found(entry, guid, unit, pos)
     local now = GetTime()
     local seen = lastSeen[guid]
     lastSeen[guid] = now
-    if unit then Mark(unit) end
     if seen and now - seen < db.realert then return end
     Alert(entry, unit, pos)
     SetWaypoint(pos)
@@ -365,30 +362,159 @@ local function Scan()
 end
 
 -------------------------------------------------------------------------------
---  Scan key binding: /targetexact every active mob
+--  The scan. Markers and pings can't be sent from addon code (SetRaidTarget /
+--  C_PingSecure are Blizzard-UI-only), but a macro run by the player's key
+--  press may, so the scan does it all:
+--    /cleartarget, /targetexact each active mob (the last one found wins),
+--    then, only if a living hostile target was found: /tm 0 + /tm <marker>
+--    (clearing first so /tm doesn't toggle an existing marker off) and
+--    /ping [@target]; nothing found: /targetlasttarget gives you your old
+--    target back.
+--  Two carriers for the same text:
+--    * the hidden button (key binding, or /click typed in chat);
+--    * a real character macro, QRareScan (/qrare makemacro), kept up to date.
+--      The button doesn't work from inside another macro: the game won't run a
+--      macro-type button /clicked from a macro (debug showed the click arrive
+--      and "scan", but nothing ran). The real macro holds the lines itself, and
+--      can end with one line of the player's (db.macroExtra, e.g. a mount), so
+--      one press scans and mounts. Macros hold 255 characters: names that
+--      don't fit are left out (the button keeps them all).
 -------------------------------------------------------------------------------
-function UpdateMacro()
-    if not scanButton then return end
-    if InCombatLockdown() then macroPending = true; return end
-    macroPending = false
-    local lines, length = {}, 0
+-- Ping cooldown: a macro can't check time, so once a watched mob becomes the
+-- target (the scan just ran, and pinged), the ping line is taken out of the
+-- scan text for db.pingCooldown seconds and put back after. Edits wait for the
+-- end of combat (macros and secure attributes can't change in combat).
+local pingBlockedUntil = 0
+
+local MACRO_NAME = "QRareScan"
+local MACRO_LIMIT = 255
+-- A living hostile target (harm implies it exists). /tm acts on the target
+-- already; /ping is told explicitly.
+local FOUND = "[harm,nodead]"
+local FOUND_PING = "[@target,harm,nodead]"
+
+-- The scan text for `limit` characters (nil when there's nothing to scan for)
+local function ScanText(limit, extra)
     local names = {}
     for _, entry in pairs(activeByName) do names[#names + 1] = entry.name end
     table.sort(names)
+    local tail = {}
+    if #names > 0 then
+        if db.marker >= 1 and db.marker <= 8 then
+            tail[#tail + 1] = "/tm " .. FOUND .. " 0"
+            tail[#tail + 1] = "/tm " .. FOUND .. " " .. db.marker
+        end
+        if db.ping and GetTime() >= pingBlockedUntil then
+            -- No ping type: the contextual ping (attack on a hostile mob), as RareScanner sends it
+            tail[#tail + 1] = (SLASH_PING1 or "/ping") .. " " .. FOUND_PING
+        end
+        tail[#tail + 1] = "/targetlasttarget [noexists]"
+    end
+    if extra and extra ~= "" then tail[#tail + 1] = extra end
+    local tailText = table.concat(tail, "\n")
+    if #names == 0 then return tailText ~= "" and tailText or nil end
+
+    local lines = { "/cleartarget" }
+    local length = #lines[1] + 1 + #tailText
+    local dropped = 0
     for _, name in ipairs(names) do
         local line = "/targetexact " .. name
-        if length + #line + 1 > 1000 then break end
-        lines[#lines + 1] = line
-        length = length + #line + 1
+        if length + #line + 1 > limit then
+            dropped = dropped + 1
+        else
+            lines[#lines + 1] = line
+            length = length + #line + 1
+        end
     end
-    scanButton:SetAttribute("macrotext", table.concat(lines, "\n"))
+    if #lines == 1 then return extra ~= "" and extra or nil, dropped end
+    return table.concat(lines, "\n") .. "\n" .. tailText, dropped
+end
+
+local function MacroIndex()
+    local index = GetMacroIndexByName and GetMacroIndexByName(MACRO_NAME)
+    return index and index > 0 and index or nil
+end
+
+local lastDropped = 0
+function UpdateMacro()
+    if InCombatLockdown() then macroPending = true; return end
+    macroPending = false
+    if scanButton then
+        scanButton:SetAttribute("macrotext", (ScanText(1000)) or "")
+    end
+    local index = MacroIndex()
+    if index then
+        local body, dropped = ScanText(MACRO_LIMIT, db.macroExtra)
+        body = body or "/qrare macro"
+        local _, icon, current = GetMacroInfo(index)
+        if current ~= body then pcall(EditMacro, index, MACRO_NAME, icon, body) end
+        if (dropped or 0) > 0 and dropped ~= lastDropped then
+            Say(string.format("%d watched mob%s didn't fit in the %s macro (255 characters); the scan key still has them all.",
+                dropped, dropped == 1 and "" or "s", MACRO_NAME))
+        end
+        lastDropped = dropped or 0
+    end
+end
+
+local function MakeMacro()
+    if InCombatLockdown() then Say("Macros can't be made in combat.") return end
+    if MacroIndex() then
+        Say(MACRO_NAME .. " already exists (Character tab of /macro); it updates itself.")
+        UpdateMacro()
+        return
+    end
+    local _, perChar = GetNumMacros()
+    if perChar >= (MAX_CHARACTER_MACROS or 18) then
+        Say("Your character macros are full; free a slot and try again.")
+        return
+    end
+    local ok, err = pcall(CreateMacro, MACRO_NAME, 134400, "/qrare macro", true)
+    if not ok or not MacroIndex() then
+        Say("Couldn't create the macro: " .. tostring(err))
+        return
+    end
+    UpdateMacro()
+    Say(MACRO_NAME .. " created: open /macro, Character tab, and drag it to your action bar.")
 end
 
 local function BuildScanButton()
     scanButton = CreateFrame("Button", SCAN_BUTTON, UIParent, "SecureActionButtonTemplate")
     scanButton:SetAttribute("type", "macro")
     scanButton:SetAttribute("macrotext", "")
+    -- The template runs the action on one edge only (useOnKeyDown), but callers
+    -- differ: /click typed in chat sends the up edge, /click inside a macro sends
+    -- the down edge (the macro itself runs on key down), and the key binding sends
+    -- both. So, out of combat, PreClick points useOnKeyDown at whichever edge
+    -- arrives first and swallows the other edge of the same press (type cleared,
+    -- PostClick restores it). In combat attributes can't change: the last setting
+    -- stays, which is still right for the same kind of caller.
+    scanButton:SetAttribute("useOnKeyDown", false)
     scanButton:RegisterForClicks("AnyUp", "AnyDown")
+    local lastPress = 0
+    scanButton:SetScript("PreClick", function(self, mouseButton, down)
+        local combat = InCombatLockdown()
+        local action = "kept settings (combat)"
+        if not combat then
+            local now = GetTime()
+            if now - lastPress < 0.8 then
+                self:SetAttribute("type", nil)
+                action = "ignored (other half of the same press)"
+            else
+                lastPress = now
+                self:SetAttribute("type", "macro")
+                self:SetAttribute("useOnKeyDown", down and true or false)
+                action = "scanning"
+            end
+        end
+        if db.debug then
+            Say(string.format("click: %s, %s, ActionButtonUseKeyDown=%s -> %s",
+                tostring(mouseButton), down and "down" or "up",
+                tostring(GetCVar("ActionButtonUseKeyDown")), action))
+        end
+    end)
+    scanButton:SetScript("PostClick", function(self)
+        if not InCombatLockdown() then self:SetAttribute("type", "macro") end
+    end)
     scanButton:SetSize(1, 1)
     scanButton:Hide()
 end
@@ -427,17 +553,21 @@ local function SlashHandler(message)
         db.enabled = command == "on"
         Say("Watching " .. OnOff(db.enabled) .. ".")
     elseif command == "list" or command == "" then
-        Say(string.format("Watching: %s; marker: %s; sound: %s; flash: %s; waypoint: %s; every %ss.",
-            OnOff(db.enabled), db.marker > 0 and RAID_MARKS[db.marker] or "none", OnOff(db.sound),
-            OnOff(db.flash), OnOff(db.waypoint), db.interval))
+        Say(string.format("Watching: %s; sound: %s; flash: %s; waypoint: %s; every %ss. Scan key: marker %s, ping %s.",
+            OnOff(db.enabled), OnOff(db.sound), OnOff(db.flash), OnOff(db.waypoint), db.interval,
+            db.marker > 0 and RAID_MARKS[db.marker] or "none", OnOff(db.ping)))
         ListWatched()
         if command == "" then
             Say("/qrare on | off, /qrare list")
             Say("/qrare add <name> | remove <name> - watch any mob by name, everywhere")
-            Say("/qrare mark <0-8> - raid marker to put on it (0 = none)")
             Say("/qrare sound | flash | waypoint - toggle that part of the alert")
+            Say("/qrare mark <0-8> - marker the scan key puts on a found mob (0 = none, 8 = skull)")
+            Say("/qrare ping on | off | <seconds> - the scan pings a found mob, at most once per cooldown")
             Say("/qrare nameplates - turn on enemy nameplates and raise their range (better detection)")
             Say("/qrare test - show a test alert")
+            Say("/qrare makemacro - create the QRareScan macro (scan + mark + ping) for your action bar")
+            Say("/qrare extra <macro line> | clear - a last line for QRareScan, e.g. /cast <your mount>")
+            Say("/qrare macro - show what the scan runs")
             Say("Key binding: Options > Keybindings > AddOns > \"Scan for rare quest mobs\".")
         end
     elseif command == "add" and rest ~= "" then
@@ -450,7 +580,20 @@ local function SlashHandler(message)
         Rebuild()
     elseif command == "mark" and tonumber(rest) then
         db.marker = math.max(0, math.min(8, math.floor(tonumber(rest))))
-        Say("Raid marker: " .. (db.marker > 0 and RAID_MARKS[db.marker] or "none") .. ".")
+        Say("Scan key marker: " .. (db.marker > 0 and RAID_MARKS[db.marker] or "none") .. ".")
+        UpdateMacro()
+    elseif command == "ping" then
+        local arg = rest:lower()
+        if tonumber(arg) then
+            db.pingCooldown = math.max(0, math.floor(tonumber(arg)))
+            db.ping = true
+        elseif arg == "on" or arg == "off" then
+            db.ping = arg == "on"
+        else
+            db.ping = not db.ping
+        end
+        Say(string.format("Scan ping: %s, at most once every %d seconds.", OnOff(db.ping), db.pingCooldown))
+        UpdateMacro()
     elseif command == "sound" or command == "flash" or command == "waypoint" then
         db[command] = not db[command]
         Say(command .. ": " .. OnOff(db[command]) .. ".")
@@ -462,6 +605,30 @@ local function SlashHandler(message)
         if current < 60 then pcall(SetCVar, "nameplateMaxDistance", 60) end
         Say(string.format("Enemy nameplates on, range %s yards (the game's limit applies).",
             tostring(GetCVar("nameplateMaxDistance"))))
+    elseif command == "debug" then
+        db.debug = not db.debug
+        Say("Debug: " .. OnOff(db.debug) .. " (prints every click the scan button gets, and target changes).")
+    elseif command == "makemacro" then
+        MakeMacro()
+    elseif command == "extra" then
+        if rest == "" or rest:lower() == "clear" then
+            db.macroExtra = ""
+            Say("The " .. MACRO_NAME .. " macro has no extra line now.")
+        else
+            db.macroExtra = rest
+            Say("The " .. MACRO_NAME .. " macro ends with: " .. rest)
+        end
+        UpdateMacro()
+    elseif command == "macro" then
+        local text = scanButton and scanButton:GetAttribute("macrotext") or ""
+        if text == "" then
+            Say("The scan has nothing to look for (no watched mob here; /qrare list).")
+        else
+            Say("The scan runs:")
+            for line in text:gmatch("[^\n]+") do Say("  " .. line) end
+        end
+        if not MacroIndex() then Say("No " .. MACRO_NAME .. " macro yet (/qrare makemacro).") end
+        if macroPending then Say("(An update is waiting for combat to end.)") end
     elseif command == "test" then
         Alert({ name = "Test Rare", quests = { [0] = "Test Quest" } }, nil, nil)
     else
@@ -503,7 +670,18 @@ events:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "NAME_PLATE_UNIT_ADDED" then
         if db.enabled then pcall(CheckUnit, arg1) end
     elseif event == "PLAYER_TARGET_CHANGED" then
+        if db.debug then Say("target changed: " .. tostring(UnitName("target") or "none")) end
         if db.enabled then pcall(CheckUnit, "target") end
+        -- A watched mob targeted: the scan just pinged it (macro lines run before
+        -- this event). Start the ping cooldown.
+        if db.ping and db.pingCooldown > 0 and GetTime() >= pingBlockedUntil then
+            local ok, entry = pcall(EntryForUnit, "target")
+            if ok and entry then
+                pingBlockedUntil = GetTime() + db.pingCooldown
+                UpdateMacro()
+                C_Timer.After(db.pingCooldown + 0.1, UpdateMacro)
+            end
+        end
     elseif event == "UPDATE_MOUSEOVER_UNIT" then
         if db.enabled then pcall(CheckUnit, "mouseover") end
     elseif event == "VIGNETTES_UPDATED" or event == "VIGNETTE_MINIMAP_UPDATED" then

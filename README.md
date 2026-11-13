@@ -110,11 +110,11 @@ While a quest is in your log, Questie shows its follow-on sub-quests as availabl
 
 ## Questie_RareObjectives
 
-Watches for the rare and named mobs your quests still need while you're in their zone: rare mobs, objectives that need one kill, and items that only one mob drops (for example *WANTED: Trapclaw*). When one shows up you get a raid-warning message, a sound, a flashing taskbar icon, a raid marker on the mob, and a map waypoint when its position is known. Finished objectives drop off the list by themselves.
+Watches for the rare and named mobs your quests still need while you're in their zone: rare mobs, objectives that need one kill, and items that only one mob drops (for example *WANTED: Trapclaw*). When one shows up you get a raid-warning message, a sound, a flashing taskbar icon, and a map waypoint when its position is known. Finished objectives drop off the list by themselves.
 
 Addons can't search for units on their own, so it sees what the game shows: enemy nameplates, your target and mouseover, and the minimap's rare markers. Turn enemy nameplates on (V) for it to work well.
 
-**Scan key:** for a longer reach, bind *Options > Keybindings > AddOns > "Scan for rare quest mobs"*, or put `/click QuestieRareObjectivesScan` as the first line of a macro you use out of combat (your mount macro, for example). Each press targets any watched mob in view, which raises the alert.
+**Scan:** for a longer reach, either bind *Options > Keybindings > AddOns > "Scan for rare quest mobs"*, or type `/qrare makemacro` to get a **QRareScan** macro (Character tab of `/macro`) for your action bar. The addon keeps that macro up to date, and `/qrare extra /cast <your mount>` makes it mount you too, so one press does both. Each press targets any watched mob in view, puts a raid marker on it (skull by default) and pings it. If none is in view, you keep your old target. (The game only allows markers and pings from a key you press, so the addon can't do this by itself when it spots the mob. And `/click QuestieRareObjectivesScan` inside your own macro does nothing: the game won't run it from another macro.)
 
 | Command | Does |
 |---|---|
@@ -122,9 +122,13 @@ Addons can't search for units on their own, so it sees what the game shows: enem
 | `/qrare list` | Mobs being watched, and whether they're in your zone |
 | `/qrare on` / `/qrare off` | Turn watching on or off |
 | `/qrare add <name>` / `remove <name>` | Watch any mob by name, in every zone |
-| `/qrare mark <0-8>` | Raid marker to put on the mob (0 = none, 8 = skull) |
+| `/qrare mark <0-8>` | Marker the scan key puts on a found mob (0 = none, 8 = skull) |
+| `/qrare ping on` / `off` / `<seconds>` | Whether the scan pings a found mob, and how often at most (default once every 15 seconds) |
 | `/qrare sound` / `flash` / `waypoint` | Toggle that part of the alert |
 | `/qrare nameplates` | Turn enemy nameplates on and raise their range |
+| `/qrare makemacro` | Create the QRareScan macro for your action bar |
+| `/qrare extra <macro line>` / `clear` | A last line for QRareScan, e.g. `/cast` your mount |
+| `/qrare macro` | Show what the scan runs |
 | `/qrare test` | Show a test alert |
 
 ## QuestieDB_Search
