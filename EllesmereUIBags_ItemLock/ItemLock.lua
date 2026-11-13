@@ -7,10 +7,23 @@
 --      bag slot is under the mouse (grid, list and bank views).
 --    * EUI_CategoryManager:IsJunk: locked items are never junk, so Sell Junk
 --      skips them.
+--    * EUI_CategoryManager:RegisterVirtualCategory: a runtime-only "Locked"
+--      category that claims every padlocked item (before the type and set-gear
+--      rules, so they leave Armory / Item Set Gear). /itemlock category sets off
+--      leaves gear-set-only items in Ellesmere's set categories.
+--      Nothing is saved into Ellesmere's category settings; /itemlock category
+--      off unregisters it. Another character's items (offline view, bag nil)
+--      are not claimed, since locks are per character.
 --  Everything else is plain Blizzard API.
 --
 --  Locks are per character, by item ID (every copy of the item is locked).
 --  Alt+Right-click toggles a lock.
+--
+--  Gear sets: every item in one of the character's equipment sets is protected
+--  the same way, with no lock needed (/itemlock sets off turns this off). It
+--  goes by item ID, from C_EquipmentSet.GetItemIDs: GetItemLocations crashes
+--  the WoW Forever client for some sets. Taking the item out of the set (or
+--  deleting the set) lifts the protection.
 --
 --  Protection:
 --    * Destroy: the delete confirmation is cancelled for a locked item.
@@ -36,6 +49,13 @@ local DELETE_POPUPS = {
 }
 
 local locked = {}  -- itemID -> true (the saved table once loaded)
+local setItems = {}  -- itemID -> name of the first gear set holding it
+local protectSets = true
+local useCategory = true
+local categorySets = true  -- gear-set items (blue padlock) go to Locked too
+local CATEGORY_ID = "ItemLock"
+local categoryRegistered = false
+local categoryRefreshPending = false  -- a lock changed in combat: refresh after
 local slots  = setmetatable({}, { __mode = "k" })  -- slot button -> { bag, slot, itemID }
 local marks  = setmetatable({}, { __mode = "k" })  -- slot button -> padlock texture
 local hooked = setmetatable({}, { __mode = "k" })
@@ -54,6 +74,16 @@ local function IsLocked(itemID)
     return itemID ~= nil and locked[itemID] == true
 end
 
+-- The gear set name when the item is protected by being in a set
+local function SetName(itemID)
+    return protectSets and itemID ~= nil and setItems[itemID] or nil
+end
+
+-- Locked, or in a gear set: can't be sold or destroyed
+local function IsProtected(itemID)
+    return IsLocked(itemID) or SetName(itemID) ~= nil
+end
+
 local function ItemIDFromLink(link)
     return type(link) == "string" and tonumber(link:match("item:(%d+)")) or nil
 end
@@ -64,8 +94,54 @@ local function ItemText(itemID, link)
     return itemLink or name or ("item " .. itemID)
 end
 
--- Public, for other addons or macros: EllesmereUIBags_ItemLock.IsLocked(itemID)
-EllesmereUIBags_ItemLock = { IsLocked = IsLocked }
+-- Why an item is protected, for chat: "is locked" / "is in your gear set X"
+local function Reason(itemID)
+    if IsLocked(itemID) then return "is locked" end
+    return "is in your gear set " .. (SetName(itemID) or "?")
+end
+
+-- How to lift the protection, for chat
+local function UnlockHint(itemID)
+    if IsLocked(itemID) then return "Alt+Right-click it in your bags to unlock it." end
+    return "Remove it from the set first."
+end
+
+-- Public, for other addons or macros:
+--   EllesmereUIBags_ItemLock.IsLocked(itemID)     locked with Alt+Right-click
+--   EllesmereUIBags_ItemLock.IsProtected(itemID)  locked, or in a gear set
+EllesmereUIBags_ItemLock = { IsLocked = IsLocked, IsProtected = IsProtected }
+
+-------------------------------------------------------------------------------
+--  Gear sets
+-------------------------------------------------------------------------------
+-- True when the set contents changed
+local function RebuildSetItems()
+    local fresh = {}
+    local api = C_EquipmentSet
+    if api and api.GetEquipmentSetIDs and api.GetItemIDs then
+        local ok, setIDs = pcall(api.GetEquipmentSetIDs)
+        for _, setID in ipairs(ok and setIDs or {}) do
+            local name = api.GetEquipmentSetInfo and api.GetEquipmentSetInfo(setID)
+            local okIDs, ids = pcall(api.GetItemIDs, setID)
+            for _, itemID in pairs(okIDs and ids or {}) do
+                if type(itemID) == "number" and itemID > 0 and not fresh[itemID] then
+                    fresh[itemID] = name or ("set " .. setID)
+                end
+            end
+        end
+    end
+    local changed = false
+    for id, name in pairs(fresh) do
+        if setItems[id] ~= name then changed = true break end
+    end
+    if not changed then
+        for id in pairs(setItems) do
+            if not fresh[id] then changed = true break end
+        end
+    end
+    setItems = fresh
+    return changed
+end
 
 -------------------------------------------------------------------------------
 --  Padlocks
@@ -81,12 +157,20 @@ local function Mark(btn)
     return m
 end
 
-local function ShowMark(btn, show)
-    if not show then
+local function ShowMark(btn, itemID)
+    if not IsProtected(itemID) then
         if marks[btn] then marks[btn]:Hide() end
         return
     end
     local m = Mark(btn)
+    -- Gold padlock for a lock, blue for gear-set protection only
+    if IsLocked(itemID) then
+        m:SetDesaturated(false)
+        m:SetVertexColor(1, 1, 1)
+    else
+        m:SetDesaturated(true)
+        m:SetVertexColor(0.55, 0.8, 1)
+    end
     local host = btn._textOverlay or btn
     local width = host:GetWidth() or 0
     local size = width > 0 and math.max(10, math.min(16, math.floor(width * 0.4 + 0.5))) or 14
@@ -96,7 +180,7 @@ end
 
 local function RepaintAll()
     for btn, s in pairs(slots) do
-        ShowMark(btn, IsLocked(s.itemID))
+        ShowMark(btn, s.itemID)
     end
 end
 
@@ -140,8 +224,8 @@ local function BuildBlocker()
             if IsAltKeyDown() then
                 Toggle(s.bag, s.slot)
             else
-                Say(ItemText(s.itemID, C_Container.GetContainerItemLink(s.bag, s.slot))
-                    .. " is locked, so right-click is off at merchants. Alt+Right-click to unlock it.")
+                Say(ItemText(s.itemID, C_Container.GetContainerItemLink(s.bag, s.slot)) .. " "
+                    .. Reason(s.itemID) .. ", so right-click is off at merchants. " .. UnlockHint(s.itemID))
             end
         elseif IsModifiedClick() then
             local link = C_Container.GetContainerItemLink(s.bag, s.slot)
@@ -169,7 +253,7 @@ end
 local function UpdateBlocker()
     local btn = hovered
     local s = btn and slots[btn]
-    local want = merchantOpen and s and IsLocked(s.itemID) and not InCombatLockdown()
+    local want = merchantOpen and s and IsProtected(s.itemID) and not InCombatLockdown()
         and btn:IsVisible() and btn:IsMouseOver()
     if not want then
         HideBlocker()
@@ -223,7 +307,7 @@ local function Paint(btn, data)
     else
         slots[btn] = nil
     end
-    ShowMark(btn, IsLocked(itemID))
+    ShowMark(btn, itemID)
     if blocker and blocker.owner == btn then UpdateBlocker() end
 end
 
@@ -248,14 +332,14 @@ local function CheckBuyback()
     if not merchantOpen then return end
     local counts = BuybackCounts()
     for id, count in pairs(counts) do
-        if IsLocked(id) and count > (buybackSnapshot[id] or 0) then
+        if IsProtected(id) and count > (buybackSnapshot[id] or 0) then
             for i = GetNumBuybackItems(), 1, -1 do
                 local link = GetBuybackItemLink(i)
                 if ItemIDFromLink(link) == id then
                     BuybackItem(i)
                     buybackSnapshot = counts
                     buybackSnapshot[id] = count - 1
-                    Say(ItemText(id, link) .. " is locked, so it was bought back.")
+                    Say(ItemText(id, link) .. " " .. Reason(id) .. ", so it was bought back.")
                     return  -- MERCHANT_UPDATE fires again for the next one
                 end
             end
@@ -265,15 +349,57 @@ local function CheckBuyback()
 end
 
 -------------------------------------------------------------------------------
+--  "Locked" category
+-------------------------------------------------------------------------------
+-- Runs inside Ellesmere's classify pass (securecallfunction): reads only.
+-- Every padlocked item: locked ones, and gear-set ones unless categorySets is off.
+local function ClaimLocked(_, itemID, bag)
+    if bag == nil then return false end
+    if categorySets then return IsProtected(itemID) end
+    return IsLocked(itemID)
+end
+
+local function CategoryManager()
+    local manager = _G.EUI_CategoryManager
+    if manager and type(manager.RegisterVirtualCategory) == "function" then return manager end
+end
+
+-- Registers or unregisters the category to match useCategory.
+-- Returns false when Ellesmere's API is missing.
+local function ApplyCategory()
+    local manager = CategoryManager()
+    if not manager then return false end
+    if useCategory and not categoryRegistered then
+        categoryRegistered = manager:RegisterVirtualCategory(CATEGORY_ID, {
+            name = "Locked",
+            icon = LOCK_TEXTURE,
+            order = 0,
+            classify = ClaimLocked,
+        }) and true or false
+    elseif not useCategory and categoryRegistered then
+        manager:UnregisterVirtualCategory(CATEGORY_ID)
+        categoryRegistered = false
+    end
+    return true
+end
+
+-------------------------------------------------------------------------------
 --  Locking
 -------------------------------------------------------------------------------
 local function AfterLockChange()
     SnapshotBuyback()
     RepaintAll()
     UpdateBlocker()
-    -- Junk follows the lock (EUI_CategoryManager.IsJunk below)
-    if EUI_Bags and EUI_Bags.IsShown and EUI_Bags:IsShown() and EUI_Bags.RefreshInventory
-        and not InCombatLockdown() then
+    -- Junk and the Locked category follow the lock (IsJunk patch, ClaimLocked)
+    if InCombatLockdown() then
+        categoryRefreshPending = true
+        return
+    end
+    local manager = categoryRegistered and CategoryManager()
+    if manager and manager.RefreshVirtualCategories then
+        -- Repaints the bags and an open bank on the next frame
+        manager:RefreshVirtualCategories()
+    elseif EUI_Bags and EUI_Bags.IsShown and EUI_Bags:IsShown() and EUI_Bags.RefreshInventory then
         EUI_Bags:RefreshInventory()
     end
 end
@@ -281,18 +407,35 @@ end
 local function SetLocked(itemID, lock, link)
     if not itemID then return end
     locked[itemID] = lock and true or nil
+    local set = SetName(itemID)
     if lock then
         Say(ItemText(itemID, link) .. " locked: it can't be sold or destroyed.")
+    elseif set then
+        Say(ItemText(itemID, link) .. " unlocked, but it is still protected by your gear set " .. set .. ".")
     else
         Say(ItemText(itemID, link) .. " unlocked.")
     end
     AfterLockChange()
 end
 
+-- A gear-set item needs no lock: say so instead of locking it
+local function ToggleItem(itemID, link)
+    if not IsLocked(itemID) and SetName(itemID) then
+        Say(ItemText(itemID, link) .. " is in your gear set " .. SetName(itemID)
+            .. ", so it is already protected. Remove it from the set to sell or destroy it.")
+        return
+    end
+    SetLocked(itemID, not IsLocked(itemID), link)
+end
+
 function Toggle(bag, slot)
     local itemID = C_Container.GetContainerItemID(bag, slot)
     if not itemID then return end
-    SetLocked(itemID, not IsLocked(itemID), C_Container.GetContainerItemLink(bag, slot))
+    ToggleItem(itemID, C_Container.GetContainerItemLink(bag, slot))
+end
+
+local function OnSetsChanged()
+    if RebuildSetItems() then AfterLockChange() end
 end
 
 -------------------------------------------------------------------------------
@@ -321,18 +464,22 @@ local function HookDestroy()
     hooksecurefunc("StaticPopup_Show", function(which)
         if not DELETE_POPUPS[which] then return end
         local kind, itemID, link = GetCursorInfo()
-        if kind == "item" and IsLocked(itemID) then
+        if kind == "item" and IsProtected(itemID) then
             StaticPopup_Hide(which)
             ClearCursor()
-            Say(ItemText(itemID, link) .. " is locked and can't be destroyed. Alt+Right-click it in your bags to unlock it.")
+            Say(ItemText(itemID, link) .. " " .. Reason(itemID) .. " and can't be destroyed. " .. UnlockHint(itemID))
         end
     end)
 end
 
 local function HookTooltip()
     hooksecurefunc(GameTooltip, "SetBagItem", function(tooltip, bag, slot)
-        if IsLocked(C_Container.GetContainerItemID(bag, slot)) then
+        local itemID = C_Container.GetContainerItemID(bag, slot)
+        if IsLocked(itemID) then
             tooltip:AddLine("Locked: can't be sold or destroyed (Alt+Right-click to unlock)", 1, 0.82, 0.25, true)
+            tooltip:Show()
+        elseif SetName(itemID) then
+            tooltip:AddLine("In gear set " .. SetName(itemID) .. ": can't be sold or destroyed", 0.55, 0.8, 1, true)
             tooltip:Show()
         end
     end)
@@ -343,7 +490,7 @@ local function PatchJunk()
     if not manager or type(manager.IsJunk) ~= "function" then return false end
     local isJunk = manager.IsJunk
     manager.IsJunk = function(self, itemID, ...)
-        if IsLocked(itemID) then return false end
+        if IsProtected(itemID) then return false end
         return isJunk(self, itemID, ...)
     end
     return true
@@ -359,17 +506,57 @@ local function ListLocks()
         Say("  " .. ItemText(itemID))
     end
     if not any then Say("No items are locked on this character.") end
+    local count = 0
+    for _ in pairs(setItems) do count = count + 1 end
+    if not protectSets then
+        Say("Gear set items are not protected (/itemlock sets on).")
+    elseif count > 0 then
+        Say(string.format("Plus %d item%s in your gear sets.", count, count == 1 and "" or "s"))
+    end
 end
 
 local function SlashHandler(message)
     message = message or ""
-    local command = message:lower():match("^%s*(%S*)")
+    local command, arg = message:lower():match("^%s*(%S*)%s*(%S*)")
     local itemID = ItemIDFromLink(message) or tonumber(message:match("^%s*(%d+)%s*$") or "")
     if itemID then
-        SetLocked(itemID, not IsLocked(itemID), message:match("|c.-|r"))
+        ToggleItem(itemID, message:match("|c.-|r"))
     elseif command == "list" then
         Say("Locked items:")
         ListLocks()
+    elseif command == "sets" then
+        if arg == "on" or arg == "off" then
+            protectSets = arg == "on"
+        else
+            protectSets = not protectSets
+        end
+        EllesmereUIBags_ItemLockDB.protectSets = protectSets
+        Say("Gear set items are " .. (protectSets and "protected." or "no longer protected."))
+        AfterLockChange()
+    elseif command == "category" and arg == "sets" then
+        local value = message:lower():match("sets%s+(%S+)")
+        if value == "on" or value == "off" then
+            categorySets = value == "on"
+        else
+            categorySets = not categorySets
+        end
+        EllesmereUIBags_ItemLockDB.categorySets = categorySets
+        Say(categorySets and "Gear set items go to the \"Locked\" category too."
+            or "Gear set items stay in EllesmereUI's set categories; only locked items go to \"Locked\".")
+        AfterLockChange()
+    elseif command == "category" then
+        if arg == "on" or arg == "off" then
+            useCategory = arg == "on"
+        else
+            useCategory = not useCategory
+        end
+        EllesmereUIBags_ItemLockDB.useCategory = useCategory
+        if not ApplyCategory() then
+            Say("EllesmereUIBags' category API was not found (did it change?).")
+        else
+            Say(useCategory and "Locked items get their own \"Locked\" category."
+                or "Locked items stay in their normal categories.")
+        end
     elseif command == "clear" then
         wipe(locked)
         Say("All locks on this character removed.")
@@ -379,6 +566,12 @@ local function SlashHandler(message)
         Say("/itemlock list - show locked items")
         Say("/itemlock <shift-click item> - lock or unlock that item")
         Say("/itemlock clear - remove every lock on this character")
+        Say("/itemlock sets on | off - protect gear set items (now "
+            .. (protectSets and "on" or "off") .. ")")
+        Say("/itemlock category on | off - put locked items in their own category (now "
+            .. (useCategory and "on" or "off") .. ")")
+        Say("/itemlock category sets on | off - gear set items go there too (now "
+            .. (categorySets and "on" or "off") .. ")")
     end
 end
 
@@ -391,6 +584,9 @@ events:RegisterEvent("MERCHANT_SHOW")
 events:RegisterEvent("MERCHANT_CLOSED")
 events:RegisterEvent("MERCHANT_UPDATE")
 events:RegisterEvent("PLAYER_REGEN_DISABLED")
+events:RegisterEvent("PLAYER_REGEN_ENABLED")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
+pcall(events.RegisterEvent, events, "EQUIPMENT_SETS_CHANGED")
 local hasMouseUp = pcall(events.RegisterEvent, events, "GLOBAL_MOUSE_UP")
 
 events:SetScript("OnEvent", function(_, event, arg1)
@@ -402,6 +598,13 @@ events:SetScript("OnEvent", function(_, event, arg1)
         if type(EllesmereUIBags_ItemLockDB) ~= "table" then EllesmereUIBags_ItemLockDB = {} end
         if type(EllesmereUIBags_ItemLockDB.items) ~= "table" then EllesmereUIBags_ItemLockDB.items = {} end
         locked = EllesmereUIBags_ItemLockDB.items
+        protectSets = EllesmereUIBags_ItemLockDB.protectSets ~= false
+        useCategory = EllesmereUIBags_ItemLockDB.useCategory ~= false
+        categorySets = EllesmereUIBags_ItemLockDB.categorySets ~= false
+        RebuildSetItems()
+        if not ApplyCategory() then
+            Say("EllesmereUIBags' category API was not found (did it change?). Locked items stay in their normal categories.")
+        end
 
         if EUI_Bags and EUI_Bags.RegisterItemOverlayIcon then
             EUI_Bags.RegisterItemOverlayIcon("ItemLock", Paint)
@@ -431,5 +634,12 @@ events:SetScript("OnEvent", function(_, event, arg1)
         CheckBuyback()
     elseif event == "PLAYER_REGEN_DISABLED" then
         HideBlocker()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if categoryRefreshPending then
+            categoryRefreshPending = false
+            AfterLockChange()
+        end
+    elseif event == "PLAYER_ENTERING_WORLD" or event == "EQUIPMENT_SETS_CHANGED" then
+        OnSetsChanged()
     end
 end)

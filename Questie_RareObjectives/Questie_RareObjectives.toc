@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: Questie - Rare Objectives
+## Notes: Watches for rare quest mobs you still need (e.g. Ghostpaw) while you're in their zone, and alerts, marks and waypoints them when found.
+## Author: andreg1
+## Version: 1.0.0
+## Dependencies: QuestieDB
+## OptionalDeps: Questie
+## SavedVariables: QuestieRareObjectivesDB
+
+RareObjectives.lua

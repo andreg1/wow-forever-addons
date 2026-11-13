@@ -1,0 +1,10 @@
+## Interface: 120000, 120001, 120005, 120007, 120100, 120105, 16001
+## Title: |cff0cd29fEllesmereUI|r Quest Tracker - Quest Items
+## Notes: Small item icon next to tracked quests whose objective needs you to use a quest item (e.g. Swineherd's Staff for Drive Them Back).
+## Author: andreg1
+## Version: 1.0.0
+## Dependencies: EllesmereUIQuestTracker
+## OptionalDeps: QuestieDB, Questie
+## SavedVariables: EUIQuestItemsDB
+
+QuestItems.lua

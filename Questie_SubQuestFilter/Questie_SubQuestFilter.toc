@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Questie - Sub-Quest Filter
+## Notes: Hides Questie's sub-quests (child quests of a quest in your log) until you actually meet their level and other requirements.
+## Author: andreg1
+## Version: 1.0.1
+## Dependencies: Questie
+## SavedVariables: QuestieSubQuestFilterDB
+
+SubQuestFilter.lua

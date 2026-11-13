@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Questie - New in Forever
+## Notes: Marks Questie map icons of quests that are new in WoW Forever (not part of original Classic) with a star.
+## Author: andreg1
+## Version: 1.0.0
+## Dependencies: Questie
+## SavedVariables: QuestieNewInForeverDB
+
+NewInForever.lua

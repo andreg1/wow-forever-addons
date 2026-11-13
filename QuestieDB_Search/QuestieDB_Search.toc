@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: QuestieDB - Search
+## Notes: /qs opens a quest search window: keyword search, quests that lead into a zone, Alliance/Horde filter.
+## Author: andreg1
+## Version: 2.0.0
+## Dependencies: QuestieDB
+## OptionalDeps: Questie, Questie_NewInForever
+## SavedVariablesPerCharacter: QuestieDBSearchDB
+
+QuestSearch.lua
