@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Auctionator - Darkmoon Tickets
+## Notes: Ranks Darkmoon Faire ticket turn-ins by cost per Prize Ticket, using Auctionator's last scan prices. /dmft
+## Author: andreg1
+## Version: 1.0.0
+## Dependencies: Auctionator
+## SavedVariables: DarkmoonTicketsDB
+
+Auctionator_DarkmoonTickets.lua

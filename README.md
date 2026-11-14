@@ -11,6 +11,7 @@ Small addons for World of Warcraft: Forever. Each one is its own folder, kept ap
 | [Questie_SubQuestFilter](Questie_SubQuestFilter) | Hides Questie sub-quests until you can actually pick them up | Questie |
 | [Questie_RareObjectives](Questie_RareObjectives) | Watches for rare and named quest mobs you still need in your zone, and alerts and marks them | QuestieDB (Questie recommended) |
 | [QuestieDB_Search](QuestieDB_Search) | Quest search window: keywords, quests that lead into a zone, Alliance/Horde filter | QuestieDB |
+| [Auctionator_DarkmoonTickets](Auctionator_DarkmoonTickets) | Ranks Darkmoon Faire ticket turn-ins by cost per Prize Ticket, from Auctionator's last scan | Auctionator |
 
 ## Install
 
@@ -144,6 +145,25 @@ A quest search window over QuestieDB's quest database.
 | `/qs` | Open the window |
 | `/qs <words>` | Open it and search |
 | `/qs to <zone>` | Quests that lead into that zone |
+
+## Auctionator_DarkmoonTickets
+
+Shows which Darkmoon Faire turn-in gets you Prize Tickets for the least gold. For each of the 21 turn-ins it takes Auctionator's price from your last scan and works out the cost per ticket (unit price × items per turn-in ÷ tickets). The window lists them cheapest first, with the AH unit price, how many days ago Auctionator last saw the item, how many you already have, and the tier. The cheapest one you can still turn in is shown in green.
+
+- **Search all on AH:** with the auction house open, searches all 21 items at once in Auctionator's Shopping tab, so the prices are fresh. The window updates when the search finishes.
+- **Ticket counts:** the built-in numbers come from community guides. When you turn a quest in, the addon reads the real counts from the quest window and uses those from then on, for all your characters. A `*` marks a count not yet seen in-game.
+- **Reputation:** tiers 1 to 4 stop being offered as your Darkmoon Faire reputation goes up (roughly at 401, 1100, 1625 and 2500). Tiers you're past are greyed and moved to the bottom, or hidden with the checkbox.
+- **Tooltips:** the turn-in items get a line with their tickets and cost per ticket.
+
+Prices are what it costs to buy the items, not to craft them.
+
+| Command | Does |
+|---|---|
+| `/dmft` | Open or close the window |
+| `/dmft best [n]` | Print the n cheapest turn-ins to chat (default 5) |
+| `/dmft tooltip on` / `off` | Show or hide the tooltip line |
+| `/dmft learned` | Ticket counts read from the quest window so far |
+| `/dmft forget` | Clear those and go back to the built-in numbers |
 
 ## License
 
