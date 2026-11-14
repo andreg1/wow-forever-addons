@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Highest Rank Macros
+## Notes: Creates a macro for each spell with ranks that always casts your highest known rank (#showtooltip), and keeps it updated as you learn new ranks.
+## Author: andreg1
+## Version: 1.0.0
+## SavedVariablesPerCharacter: HighestRankMacrosDB
+
+HighestRankMacros.lua

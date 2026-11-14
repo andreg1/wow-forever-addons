@@ -12,6 +12,9 @@ Small addons for World of Warcraft: Forever. Each one is its own folder, kept ap
 | [Questie_RareObjectives](Questie_RareObjectives) | Watches for rare and named quest mobs you still need in your zone, and alerts and marks them | QuestieDB (Questie recommended) |
 | [QuestieDB_Search](QuestieDB_Search) | Quest search window: keywords, quests that lead into a zone, Alliance/Horde filter | QuestieDB |
 | [Auctionator_DarkmoonTickets](Auctionator_DarkmoonTickets) | Ranks Darkmoon Faire ticket turn-ins by cost per Prize Ticket, from Auctionator's last scan | Auctionator |
+| [SpecGearSwap](SpecGearSwap) | Equips the gear set that goes with your talent spec when you switch specs, and updates the set when you change a weapon | Nothing |
+| [FishingPoleAlert](FishingPoleAlert) | Warns you when you're in combat with a fishing pole equipped, with a key to put your weapons back on | Nothing |
+| [HighestRankMacros](HighestRankMacros) | One macro per ranked spell that always casts your highest rank, so your bars never need updating | Nothing |
 
 ## Install
 
@@ -164,6 +167,65 @@ Prices are what it costs to buy the items, not to craft them.
 | `/dmft tooltip on` / `off` | Show or hide the tooltip line |
 | `/dmft learned` | Ticket counts read from the quest window so far |
 | `/dmft forget` | Clear those and go back to the built-in numbers |
+
+## SpecGearSwap
+
+When you switch talent spec (dual spec), this equips the gear set that goes with the new spec. It uses the game's own equipment sets, so make those first.
+
+- **Linking a set to a spec:** put the set on while in that spec and type `/specgear link`. Or name it: `/specgear set 1 Holy`.
+- **No link needed** if a set is named after the spec's main talent tree (for example a set called "Feral" for a Feral spec).
+- **Learning:** in a spec with no set, the first set you put on by hand is linked to it.
+- **In combat:** gear can't change in combat, so the swap happens when combat ends.
+- **Missing items:** you're told how many items of the set aren't in your bags.
+
+**Weapon auto-save:** while you're wearing a set, replacing a weapon (main hand, off hand or ranged) saves the new weapon into that set. It only does this when the rest of your gear still matches the set, so nothing else gets written into it by accident. It never saves an empty weapon slot or a fishing pole. If the new weapons make you match another set completely, it treats that as switching sets and saves nothing. `/specgear why` tells you why a change wasn't saved.
+
+| Command | Does |
+|---|---|
+| `/specgear` (or `/sgs`) | Which set each spec uses, and the set you're wearing |
+| `/specgear on` / `off` | Turn the automatic swap on or off |
+| `/specgear sets` | List your gear sets |
+| `/specgear link [spec]` | Link the set you're wearing to this spec (or spec 1 / 2) |
+| `/specgear set <spec> <set name>` | Link a set by name |
+| `/specgear clear <spec>` | Remove a spec's link |
+| `/specgear equip` | Put on this spec's set now |
+| `/specgear learn on` / `off` | Link the first set you put on in a spec without one (default on) |
+| `/specgear byname on` / `off` | Use a set named after the main talent tree (default on) |
+| `/specgear autosave on` / `off` | Save weapon changes into the set you're wearing (default on) |
+| `/specgear why` | Would a weapon change be saved right now, and if not, why |
+
+Settings are saved per character.
+
+## FishingPoleAlert
+
+If combat starts while a fishing pole is in your hand, or you put one on during a fight, you get a pulsing alert at the top of the screen, a raid-warning message, a sound and a flashing taskbar icon. The sound and message repeat every 8 seconds until the pole comes off or combat ends.
+
+**Weapon swap key:** bind *Options > Keybindings > AddOns > Fishing Pole Alert > "Put my weapons back on"*. The addon remembers the last weapons you wore (main hand, plus off hand if you had one), and the key puts them back on, in combat too. Wear your normal weapons once before you fish so it knows them. (Addons can't change your gear by themselves in combat, but a key you press can.)
+
+| Command | Does |
+|---|---|
+| `/fpa` | Settings, the bound key and the remembered weapons |
+| `/fpa on` / `off` | Turn the alert on or off |
+| `/fpa sound` / `warning` / `flash` | Toggle that part of the alert |
+| `/fpa repeat <seconds>` | How often it repeats (0 = once per fight) |
+| `/fpa test` | Show the alert for 5 seconds |
+
+## HighestRankMacros
+
+For every spell in your spellbook that has ranks, this keeps a character macro that casts the spell without a rank (`#showtooltip` + `/cast Frostbolt`). A cast without a rank uses the highest rank you know, so when you train a new rank, the macro on your bar uses it right away. Drag the macros (`/macro`, Character tab) to your bars instead of the spells.
+
+- New ranked spells get a macro by themselves when you learn them (`/hrm auto off` to stop that).
+- Macros are named after the spell, with a "+" if you already have a macro by that name. Your own macros are never changed or deleted.
+- A macro of this addon's that you delete stays deleted, until `/hrm make`.
+- Macros can't be changed in combat, so changes wait for combat to end.
+
+| Command | Does |
+|---|---|
+| `/hrm make` | Create the missing macros and update the rest |
+| `/hrm list` | Ranked spells, whether each has a macro, and free macro slots |
+| `/hrm auto on` / `off` | Make macros for newly learned ranked spells (default on) |
+| `/hrm ignore <spell>` / `unignore <spell>` | No macro for that spell |
+| `/hrm delete` | Delete every macro this addon made |
 
 ## License
 

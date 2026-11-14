@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Spec Gear Swap
+## Notes: Equips the gear set linked to a talent spec when you switch specs. /specgear
+## Author: andreg1
+## Version: 1.0.0
+## SavedVariablesPerCharacter: SpecGearSwapDB
+
+SpecGearSwap.lua

@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Fishing Pole Alert
+## Notes: Warns you when you're in combat with a fishing pole equipped, with a key to put your weapons back on. /fpa
+## Author: andreg1
+## Version: 1.0.0
+## SavedVariablesPerCharacter: FishingPoleAlertDB
+
+FishingPoleAlert.lua
