@@ -12,7 +12,7 @@ Small addons for World of Warcraft: Forever. Each one is its own folder, kept ap
 | [Questie_RareObjectives](Questie_RareObjectives) | Watches for rare and named quest mobs you still need in your zone, and alerts and marks them | QuestieDB (Questie recommended) |
 | [QuestieDB_Search](QuestieDB_Search) | Quest search window: keywords, quests that lead into a zone, Alliance/Horde filter | QuestieDB |
 | [Auctionator_DarkmoonTickets](Auctionator_DarkmoonTickets) | Ranks Darkmoon Faire ticket turn-ins by cost per Prize Ticket, from Auctionator's last scan | Auctionator |
-| [SpecGearSwap](SpecGearSwap) | Equips the gear set that goes with your talent spec when you switch specs, and updates the set when you change a weapon | Nothing |
+| [SpecGearSwap](SpecGearSwap) | Equips the gear set that goes with your talent spec when you switch specs, updates the set when you change a piece of gear, and puts back action bars the game empties on a spec switch | Nothing |
 | [FishingPoleAlert](FishingPoleAlert) | Warns you when you're in combat with a fishing pole equipped, with a key to put your weapons back on | Nothing |
 | [HighestRankMacros](HighestRankMacros) | One macro per ranked spell that always casts your highest rank, so your bars never need updating | Nothing |
 
@@ -178,7 +178,16 @@ When you switch talent spec (dual spec), this equips the gear set that goes with
 - **In combat:** gear can't change in combat, so the swap happens when combat ends.
 - **Missing items:** you're told how many items of the set aren't in your bags.
 
-**Weapon auto-save:** while you're wearing a set, replacing a weapon (main hand, off hand or ranged) saves the new weapon into that set. It only does this when the rest of your gear still matches the set, so nothing else gets written into it by accident. It never saves an empty weapon slot or a fishing pole. If the new weapons make you match another set completely, it treats that as switching sets and saves nothing. `/specgear why` tells you why a change wasn't saved.
+**Gear auto-save:** while you're wearing a set, replacing any piece of it (armor, rings, trinkets, weapons) saves the new piece into that set. Shirt and tabard don't count, and neither do slots the set ignores. It doesn't save when:
+
+- a slot the set fills is now empty (you took something off; an off hand emptied by a two-handed weapon is fine)
+- a fishing pole is in your main hand
+- your gear now matches another set completely (that's switching sets)
+- more than 4 pieces changed at once (that looks like different gear, not an upgrade; `/specgear save` saves it anyway)
+
+`/specgear why` tells you why a change wasn't saved.
+
+**Action bar restore:** the game sometimes empties one of your action bars when you switch spec after logging in. The addon keeps a backup of each spec's bars and refills any emptied slots from it right after a switch. It never replaces a slot that holds something, and slots you clear yourself stay cleared. Visit each spec once after installing so both have a backup. Restores wait until combat ends.
 
 | Command | Does |
 |---|---|
@@ -191,8 +200,13 @@ When you switch talent spec (dual spec), this equips the gear set that goes with
 | `/specgear equip` | Put on this spec's set now |
 | `/specgear learn on` / `off` | Link the first set you put on in a spec without one (default on) |
 | `/specgear byname on` / `off` | Use a set named after the main talent tree (default on) |
-| `/specgear autosave on` / `off` | Save weapon changes into the set you're wearing (default on) |
-| `/specgear why` | Would a weapon change be saved right now, and if not, why |
+| `/specgear autosave on` / `off` | Save gear changes into the set you're wearing (default on) |
+| `/specgear save` | Save what you're wearing into that set now |
+| `/specgear why` | Would a gear change be saved right now, and if not, why |
+| `/specgear bars` | How many actions are backed up per spec |
+| `/specgear bars restore` | Fill empty slots from the backup now |
+| `/specgear bars save` | Back up the bars as they are now |
+| `/specgear bars on` / `off` | Turn the action bar restore on or off (default on) |
 
 Settings are saved per character.
 

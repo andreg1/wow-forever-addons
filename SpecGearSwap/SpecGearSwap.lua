@@ -22,24 +22,40 @@
   Links are stored by set name (and ID as a fallback, so a renamed set
   still works), per character.
 
-  Weapon auto-save: while you wear a gear set and replace a weapon (main
-  hand, off hand, ranged), the set is re-saved with the new weapon
-  (C_EquipmentSet.SaveEquipmentSet). Safeguards, because a save stores
-  every slot you're wearing:
+  Gear auto-save: while you wear a gear set and replace any piece of it
+  (slots 1-18 except shirt/tabard, and slots the set ignores), the set is
+  re-saved with the new piece (C_EquipmentSet.SaveEquipmentSet).
+  Safeguards, because a save stores every slot you're wearing:
     - the set is the one you last put on (EQUIPMENT_SWAP_FINISHED, or the
       set the game reports fully equipped), never a guess between sets
-      that share armor;
-    - every non-weapon slot of the set (except shirt/tabard and slots the
-      set ignores) must still be what the set has;
-    - no save if a weapon slot the set filled is now empty (unless the
-      off hand emptied because the new main hand is two-handed), if the
-      main hand is a fishing pole, or if the new weapons fully match
-      another set (that's switching sets, not changing a weapon);
+      that share pieces;
+    - no save if a slot the set filled is now empty (taking gear off,
+      mid-swap; the off hand may empty for a two-handed main hand), if the
+      main hand is a fishing pole, or if your gear now fully matches
+      another set (that's switching sets, not changing a piece);
+    - more than 4 slots changed in one go looks like other gear, not an
+      upgrade: not saved, with a chat note (/specgear save forces it);
     - changes are debounced 0.7 s (a swap fires several events), our own
       and the equipment manager's swaps are skipped, and a change made in
       combat is checked again when combat ends.
   Set contents come from C_EquipmentSet.GetItemIDs (GetItemLocations
   crashes the Forever client).
+
+  Action bar restore: the client sometimes empties one of your action bars
+  when you switch spec after a relog. Each spec's bars are backed up
+  (db.bars[group][slot] = spell ID + name / item ID / macro name /
+  equipment set name, or false for empty), kept current from
+  ACTIONBAR_SLOT_CHANGED. On a spec change, recording pauses 4 s (the bars
+  are loading the other layout; a change seen while GetActiveTalentGroup
+  no longer matches the group we last handled is skipped too), and at
+  1 s and 3 s every slot that is empty now but has something in the
+  backup is refilled (PickupSpell/PickupItem/PickupMacro/
+  C_EquipmentSet.PickupEquipmentSet + PlaceAction, out of combat, only
+  with an empty cursor). Slots that hold something are never replaced.
+  Up to 15 s after a switch, 6+ slots emptied within 1 s count as the bug
+  and are refilled; otherwise an emptied slot is your change and is
+  recorded. (That check is limited to after a switch because
+  ActionBarSaverReloaded's restore also empties many slots at once.)
 
   Taint/combat: gear can't be swapped in combat, so a switch made in
   combat is queued and done on PLAYER_REGEN_ENABLED. No secure frames or
@@ -52,8 +68,10 @@ local defaults = {
   enabled = true,
   learn = true,     -- link the first hand-equipped set to an unlinked spec
   byName = true,    -- fall back to a set named like the main talent tree
-  autoSave = true,  -- re-save the worn set when you replace a weapon
+  autoSave = true,  -- re-save the worn set when you replace a piece of it
+  barRestore = true, -- back up each spec's action bars, refill emptied slots on spec change
   links = {},       -- [group] = { name = "Set", id = n }
+  bars = {},        -- [group][slot] = { type, id, name } | false (empty)
 }
 
 local db
@@ -62,7 +80,7 @@ local pendingEquip   -- group to equip after combat
 local selfSwap = 0   -- GetTime() of our own last swap (ignored by learn)
 local wornSet        -- setID of the set you last put on
 local swapPending = false -- equipment manager swap in progress
-local pendingSave = false -- weapon changed in combat, check after
+local pendingSave = false -- gear changed in combat, check after
 local saveTimer
 
 local function Say(msg)
@@ -215,11 +233,16 @@ local function Link(group, id)
 end
 
 ---------------------------------------------------------------------------
--- Weapon auto-save
+-- Gear auto-save
 ---------------------------------------------------------------------------
 
-local WEAPON_SLOTS = { [16] = true, [17] = true, [18] = true }
-local SKIP_SLOTS = { [4] = true, [19] = true } -- shirt, tabard
+local SKIP_SLOTS = { [4] = true, [19] = true } -- shirt, tabard: cosmetic, never a reason to save
+local MAX_AT_ONCE = 4 -- more slots changed in one go than this = a different outfit, not an upgrade
+local SLOT_LABEL = {
+  [1] = "head", [2] = "neck", [3] = "shoulder", [5] = "chest", [6] = "waist", [7] = "legs",
+  [8] = "feet", [9] = "wrist", [10] = "hands", [11] = "ring", [12] = "ring", [13] = "trinket",
+  [14] = "trinket", [15] = "back", [16] = "main hand", [17] = "off hand", [18] = "ranged",
+}
 
 local function Norm(id) return (type(id) == "number" and id > 1) and id or nil end
 
@@ -248,41 +271,59 @@ local function ItemName(id)
   return link or name or ("item " .. id)
 end
 
--- Changed weapon slots ({slot = newID}) if `setID` should be re-saved, else nil + reason.
-local function WeaponChanges(setID)
+-- Changed slots ({slot = newID or false}, count) if `setID` should be
+-- re-saved, else nil + reason. `force` skips the many-slots limit.
+local function GearChanges(setID, force)
   local ids, ignored = SetItems(setID)
   if not ids then return nil, "can't read the set" end
-  for slot = 1, 19 do
-    if not WEAPON_SLOTS[slot] and not SKIP_SLOTS[slot] and not ignored[slot] then
-      if Norm(ids[slot]) ~= Norm(GetInventoryItemID("player", slot)) then
-        return nil, "armor differs from the set"
-      end
-    end
-  end
   local main = Norm(GetInventoryItemID("player", 16))
   if main then
     local _, classID, subclassID = Instant(main)
-    if classID == 2 and subclassID == 20 then return nil, "fishing pole" end
+    if classID == 2 and subclassID == 20 then return nil, "a fishing pole is in your main hand" end
   end
   local mainIs2H = main and Instant(main) == "INVTYPE_2HWEAPON"
-  local changes, any = {}, false
-  for slot in pairs(WEAPON_SLOTS) do
-    if not ignored[slot] then
+  local changes, n = {}, 0
+  for slot = 1, 18 do
+    if not SKIP_SLOTS[slot] and not ignored[slot] then
       local want, have = Norm(ids[slot]), Norm(GetInventoryItemID("player", slot))
       if want ~= have then
+        -- an emptied slot is taking gear off (repairs, mid-swap), not a new piece
         if not have and want and not (slot == 17 and mainIs2H) then
-          return nil, "a weapon slot is empty"
+          return nil, "your " .. (SLOT_LABEL[slot] or ("slot " .. slot)) .. " slot is empty"
         end
         changes[slot] = have or false
-        any = true
+        n = n + 1
       end
     end
   end
-  if not any then return nil, "weapons match" end
-  return changes
+  if n == 0 then return nil, "you're wearing exactly the set" end
+  if n > MAX_AT_ONCE and not force then
+    return nil, string.format("%d slots changed at once (looks like different gear, not an upgrade; /specgear save saves it anyway)", n)
+  end
+  return changes, n
 end
 
-local function CheckWeaponSave()
+local function SaveWorn(force)
+  local name = SetInfo(wornSet)
+  local changes, why = GearChanges(wornSet, force)
+  if not changes then
+    if force then Say("not saved: " .. why .. ".")
+    elseif why:find("slots changed at once") then Say(name .. " not updated: " .. why .. ".") end
+    return
+  end
+  local ok, err = pcall(C_EquipmentSet.SaveEquipmentSet, wornSet)
+  if not ok then Say("couldn't update " .. name .. ": " .. tostring(err)) return end
+  local parts = {}
+  for slot = 1, 18 do
+    if changes[slot] ~= nil then
+      table.insert(parts, (SLOT_LABEL[slot] or ("slot " .. slot)) .. " " ..
+        (changes[slot] and ItemName(changes[slot]) or "|cff808080empty|r"))
+    end
+  end
+  Say(string.format("updated |cffffffff%s|r: %s.", name, table.concat(parts, ", ")))
+end
+
+local function CheckGearSave()
   saveTimer = nil
   -- a set that fully matches now is simply the set you're wearing
   local equipped = EquippedSet()
@@ -291,24 +332,170 @@ local function CheckWeaponSave()
   if swapPending or GetTime() - selfSwap < 2 then return end
   if InCombatLockdown() then pendingSave = true return end
   if not C_EquipmentSet.SaveEquipmentSet then return end
-  local changes = WeaponChanges(wornSet)
-  if not changes then return end
-  local name = SetInfo(wornSet)
-  local ok, err = pcall(C_EquipmentSet.SaveEquipmentSet, wornSet)
-  if not ok then Say("couldn't update " .. name .. ": " .. tostring(err)) return end
-  local parts = {}
-  for _, slot in ipairs({ 16, 17, 18 }) do
-    if changes[slot] ~= nil then
-      local label = slot == 16 and "main hand" or slot == 17 and "off hand" or "ranged"
-      table.insert(parts, label .. " " .. (changes[slot] and ItemName(changes[slot]) or "|cff808080empty|r"))
-    end
-  end
-  Say(string.format("updated |cffffffff%s|r: %s.", name, table.concat(parts, ", ")))
+  SaveWorn(false)
 end
 
-local function QueueWeaponSave()
+local function QueueGearSave()
   if saveTimer then saveTimer:Cancel() end
-  saveTimer = C_Timer.NewTimer(0.7, CheckWeaponSave)
+  saveTimer = C_Timer.NewTimer(0.7, CheckGearSave)
+end
+
+---------------------------------------------------------------------------
+-- Action bar backup
+---------------------------------------------------------------------------
+
+local MAX_SLOTS = 120
+for _, n in ipairs({ 180, 132 }) do
+  if pcall(GetActionInfo, n) then MAX_SLOTS = n break end
+end
+local WIPE_COUNT = 6       -- this many slots emptied within WIPE_WINDOW = a wipe, not you
+local WIPE_WINDOW = 1.0
+local WIPE_AFTER_SWITCH = 15 -- ...but only this soon after a spec switch (ActionBarSaver
+                             -- restores also empty many slots at once, and are wanted)
+local barGuardUntil = 0    -- no recording until then (spec switch in progress)
+local lastSpecSwitch = -100
+local clearedSlots = {}    -- [slot] = true, emptied slots waiting to be judged
+local clearTimer
+local restorePending = false
+local barsReady = false    -- first login snapshot taken
+
+local function Bars(group)
+  db.bars[group] = db.bars[group] or {}
+  return db.bars[group]
+end
+
+-- What a slot holds, as stored: { type, id, name } or nil.
+local function ReadSlot(slot)
+  local kind, id = GetActionInfo(slot)
+  if not kind then return nil end
+  local e = { type = kind, id = id }
+  if kind == "macro" then
+    e.name = GetActionText(slot)
+    if not e.name then return nil end
+  elseif kind == "spell" then
+    local f = (C_Spell and C_Spell.GetSpellName) or GetSpellInfo
+    e.name = id and f and f(id) or nil
+  elseif kind ~= "item" and kind ~= "equipmentset" then
+    return nil -- companions, flyouts...: not restorable here
+  end
+  return e
+end
+
+local function Record(slot)
+  Bars(ActiveGroup())[slot] = ReadSlot(slot) or false
+end
+
+local function SnapshotAll(group, keepEmpties)
+  local bars = Bars(group)
+  for slot = 1, MAX_SLOTS do
+    local e = ReadSlot(slot)
+    if e then bars[slot] = e
+    elseif not keepEmpties then bars[slot] = false end
+  end
+end
+
+local PickupSpellF = (C_Spell and C_Spell.PickupSpell) or PickupSpell
+local PickupItemF = (C_Item and C_Item.PickupItem) or PickupItem
+
+local function PickupEntry(e)
+  if e.type == "spell" then
+    pcall(PickupSpellF, e.id)
+    if not GetCursorInfo() and e.name then pcall(PickupSpellF, e.name) end
+  elseif e.type == "item" then
+    pcall(PickupItemF, e.id)
+  elseif e.type == "macro" then
+    pcall(PickupMacro, e.name)
+  elseif e.type == "equipmentset" then
+    local setID = C_EquipmentSet.GetEquipmentSetID and C_EquipmentSet.GetEquipmentSetID(e.id)
+    if setID then pcall(C_EquipmentSet.PickupEquipmentSet, setID) end
+  end
+  return GetCursorInfo() == e.type
+end
+
+-- Fill the empty slots the backup has something for. Returns restored, failed.
+local function RestoreBars(onlySlots)
+  if InCombatLockdown() then restorePending = true return 0, 0 end
+  if GetCursorInfo() then -- you're holding something: try again shortly
+    C_Timer.After(1, function() RestoreBars(onlySlots) end)
+    return 0, 0
+  end
+  local bars = Bars(ActiveGroup())
+  local restored, failed = 0, {}
+  for slot = 1, MAX_SLOTS do
+    local e = bars[slot]
+    if e and (not onlySlots or onlySlots[slot]) and not GetActionInfo(slot) then
+      if PickupEntry(e) then
+        PlaceAction(slot)
+        restored = restored + 1
+      else
+        table.insert(failed, e.name or tostring(e.id))
+      end
+      ClearCursor()
+    end
+  end
+  if restored > 0 then
+    Say(string.format("restored %d action bar slot%s.", restored, restored == 1 and "" or "s"))
+  end
+  if #failed > 0 then
+    Say("couldn't restore: " .. table.concat(failed, ", ") .. ".")
+  end
+  return restored, #failed
+end
+
+-- Emptied slots are judged together: a handful is you, a whole bar at once is the bug.
+local function JudgeCleared()
+  clearTimer = nil
+  local slots, n = {}, 0
+  for slot in pairs(clearedSlots) do
+    if not GetActionInfo(slot) then slots[slot] = true n = n + 1 else Record(slot) end
+  end
+  wipe(clearedSlots)
+  if n == 0 then return end
+  if n >= WIPE_COUNT and db.barRestore and GetTime() - lastSpecSwitch < WIPE_AFTER_SWITCH then
+    Say(string.format("%d action slots emptied at once; putting them back.", n))
+    RestoreBars(slots)
+  else
+    for slot in pairs(slots) do Record(slot) end
+  end
+end
+
+local function OnSlotChanged(slot)
+  if not (db.barRestore and barsReady) then return end
+  if not slot or slot < 1 or slot > MAX_SLOTS then return end
+  -- mid-switch: the bars are loading the other spec's layout
+  if GetTime() < barGuardUntil or ActiveGroup() ~= lastGroup then return end
+  if GetActionInfo(slot) then
+    clearedSlots[slot] = nil
+    Record(slot)
+  else
+    clearedSlots[slot] = true
+    if not clearTimer then clearTimer = C_Timer.NewTimer(WIPE_WINDOW, JudgeCleared) end
+  end
+end
+
+local function BarsAfterSpecChange(group)
+  if not db.barRestore then return end
+  wipe(clearedSlots)
+  lastSpecSwitch = GetTime()
+  barGuardUntil = GetTime() + 4
+  -- two passes: bars can arrive a little after the switch
+  C_Timer.After(1.0, function() if ActiveGroup() == group then RestoreBars() end end)
+  C_Timer.After(3.0, function()
+    if ActiveGroup() ~= group then return end
+    RestoreBars()
+    -- the new spec's own layout counts from here: record what's set
+    SnapshotAll(group, true)
+  end)
+end
+
+local function BarsAtLogin()
+  C_Timer.After(3, function()
+    local g = ActiveGroup()
+    local first = next(Bars(g)) == nil
+    -- first time: full backup; later: add what's set, keep the rest
+    SnapshotAll(g, not first)
+    barsReady = true
+  end)
 end
 
 ---------------------------------------------------------------------------
@@ -319,6 +506,7 @@ local function OnSpecChanged()
   local g = ActiveGroup()
   if g == lastGroup then return end
   lastGroup = g
+  BarsAfterSpecChange(g)
   if not db.enabled then return end
   -- let the talent swap settle (spells, stats) before swapping gear
   C_Timer.After(0.3, function()
@@ -331,12 +519,12 @@ end
 ---------------------------------------------------------------------------
 
 local function Status()
-  Say(string.format("%s, now in %s. Learn: %s, tree-name match: %s, weapon auto-save: %s.",
+  Say(string.format("%s, now in %s. Learn: %s, tree-name match: %s, gear auto-save: %s.",
     db.enabled and "|cff00ff00on|r" or "|cffff4040off|r", SpecLabel(ActiveGroup()),
     db.learn and "on" or "off", db.byName and "on" or "off", db.autoSave and "on" or "off"))
   local worn = wornSet and SetInfo(wornSet)
   DEFAULT_CHAT_FRAME:AddMessage("  Wearing: " .. (worn and ("|cffffffff" .. worn .. "|r" ..
-    (EquippedSet() == wornSet and "" or " (weapons changed)")) or "|cff808080no set|r"))
+    (EquippedSet() == wornSet and "" or " (gear changed since)")) or "|cff808080no set|r"))
   for g = 1, NumGroups() do
     local id, name, how = SetForGroup(g)
     local line = id and string.format("|cffffffff%s|r (%s)", name, how) or "|cff808080no set|r"
@@ -396,13 +584,38 @@ local function Slash(msg)
     Say("tree-name match " .. (db.byName and "on" or "off"))
   elseif cmd == "autosave" then
     db.autoSave = (rest == "on") or (rest ~= "off" and not db.autoSave)
-    Say("weapon auto-save " .. (db.autoSave and "on: replacing a weapon while wearing a set updates that set." or "off"))
+    Say("gear auto-save " .. (db.autoSave and "on: replacing a piece of gear while wearing a set updates that set." or "off"))
+  elseif cmd == "bars" then
+    local sub = rest:lower()
+    if sub == "on" or sub == "off" then
+      db.barRestore = (sub == "on")
+      Say("action bar restore " .. (db.barRestore and "on" or "off"))
+    elseif sub == "restore" then
+      local r, f = RestoreBars()
+      if r == 0 and f == 0 and not InCombatLockdown() then Say("no empty slots to fill from the backup.") end
+    elseif sub == "save" then
+      SnapshotAll(ActiveGroup(), false)
+      Say(SpecLabel(ActiveGroup()) .. ": action bars backed up as they are now.")
+    else
+      for g = 1, NumGroups() do
+        local n = 0
+        for _, e in pairs(Bars(g)) do if e then n = n + 1 end end
+        DEFAULT_CHAT_FRAME:AddMessage(string.format("  %s%s: %d action%s backed up", SpecLabel(g),
+          g == ActiveGroup() and " *" or "", n, n == 1 and "" or "s"))
+      end
+      Say("action bar restore " .. (db.barRestore and "on" or "off") ..
+        ". /specgear bars on|off | restore (fill empty slots now) | save (back up the bars as they are)")
+    end
   elseif cmd == "why" then
     if not wornSet or not SetInfo(wornSet) then Say("not wearing a set.") return end
-    local changes, reason = WeaponChanges(wornSet)
-    Say(SetInfo(wornSet) .. ": " .. (changes and "weapons differ, it would be saved" or ("no save: " .. reason)))
+    local changes, reason = GearChanges(wornSet)
+    Say(SetInfo(wornSet) .. ": " .. (changes and (reason .. " slot(s) differ, it would be saved") or ("no save: " .. reason)))
+  elseif cmd == "save" then
+    if not wornSet or not SetInfo(wornSet) then Say("not wearing a set (put one on first).") return end
+    if InCombatLockdown() then Say("can't save a set in combat.") return end
+    SaveWorn(true)
   else
-    Say("/specgear [status] | on | off | sets | link [spec] | set <spec> <set name> | clear <spec> | equip | learn on|off | byname on|off | autosave on|off | why")
+    Say("/specgear [status] | on | off | sets | link [spec] | set <spec> <set name> | clear <spec> | equip | learn on|off | byname on|off | autosave on|off | save | why | bars [on|off|restore|save]")
   end
 end
 
@@ -432,20 +645,30 @@ ev:SetScript("OnEvent", function(_, event, arg1, arg2)
     ev:RegisterEvent("PLAYER_REGEN_ENABLED")
     ev:RegisterEvent("EQUIPMENT_SWAP_FINISHED")
     ev:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+    ev:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
     pcall(ev.RegisterEvent, ev, "EQUIPMENT_SWAP_PENDING")
   elseif event == "PLAYER_ENTERING_WORLD" then
-    if not lastGroup then lastGroup = ActiveGroup() end
+    if not lastGroup then
+      lastGroup = ActiveGroup()
+      BarsAtLogin()
+    end
     if not wornSet then wornSet = EquippedSet() end
+  elseif event == "ACTIONBAR_SLOT_CHANGED" then
+    OnSlotChanged(arg1)
   elseif event == "PLAYER_EQUIPMENT_CHANGED" then
-    if WEAPON_SLOTS[arg1] then QueueWeaponSave() end
+    if arg1 and arg1 >= 1 and arg1 <= 18 and not SKIP_SLOTS[arg1] then QueueGearSave() end
   elseif event == "EQUIPMENT_SWAP_PENDING" then
     swapPending = true
   elseif event == "ACTIVE_TALENT_GROUP_CHANGED" or event == "PLAYER_TALENT_UPDATE" then
     if lastGroup then OnSpecChanged() end
   elseif event == "PLAYER_REGEN_ENABLED" then
+    if restorePending then
+      restorePending = false
+      RestoreBars()
+    end
     if pendingSave then
       pendingSave = false
-      QueueWeaponSave()
+      QueueGearSave()
     end
     if pendingEquip then
       local g = pendingEquip
